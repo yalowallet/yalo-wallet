@@ -1,12 +1,29 @@
-import { useEffect, useState } from 'react';
+
+import { useCallback, useEffect, useState } from 'react';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
-import { createPublicClient, createWalletClient, custom, formatEther, http, isAddress, parseEther } from 'viem';
+import {
+  createPublicClient,
+  createWalletClient,
+  custom,
+  formatEther,
+  http,
+  isAddress,
+  parseEther
+} from 'viem';
 import { base, mainnet } from 'viem/chains';
 import { QRCodeSVG } from 'qrcode.react';
 import {
-  Wallet, ArrowDownLeft, ArrowUpRight, RefreshCw,
-  Copy, LogOut, ShieldCheck, Globe, CreditCard,
-  TrendingUp, X
+  Wallet,
+  ArrowDownLeft,
+  ArrowUpRight,
+  RefreshCw,
+  Copy,
+  LogOut,
+  ShieldCheck,
+  Globe,
+  CreditCard,
+  TrendingUp,
+  X
 } from 'lucide-react';
 
 type NetworkName = 'base' | 'ethereum';
@@ -16,13 +33,15 @@ const networks = {
     chain: base,
     name: 'Base',
     symbol: 'ETH',
-    rpc: 'https://mainnet.base.org'
+    rpc: 'https://mainnet.base.org',
+    explorer: 'https://basescan.org'
   },
   ethereum: {
     chain: mainnet,
     name: 'Ethereum',
     symbol: 'ETH',
-    rpc: 'https://ethereum-rpc.publicnode.com'
+    rpc: 'https://ethereum-rpc.publicnode.com',
+    explorer: 'https://etherscan.io'
   }
 };
 
@@ -45,7 +64,7 @@ export default function App() {
   const address = wallet?.address;
   const selectedNetwork = networks[network];
 
-  async function loadBalance() {
+  const loadBalance = useCallback(async () => {
     if (!address) return;
 
     setRefreshing(true);
@@ -62,18 +81,18 @@ export default function App() {
 
       setBalance(formatEther(result));
     } catch (error) {
-      console.error(error);
+      console.error('BALANCE ERROR:', error);
       setMessage('Unable to load balance. Please try again.');
     } finally {
       setRefreshing(false);
     }
-  }
+  }, [address, selectedNetwork]);
 
   useEffect(() => {
     if (authenticated && address) {
-      loadBalance();
+      void loadBalance();
     }
-  }, [authenticated, address, network]);
+  }, [authenticated, address, loadBalance]);
 
   async function handleSend() {
     setMessage('');
@@ -89,75 +108,67 @@ export default function App() {
       return;
     }
 
-    if (!amount || !Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+    if (
+      !amount ||
+      !/^(?:\d+\.?\d*|\.\d+)$/.test(amount) ||
+      !Number.isFinite(Number(amount)) ||
+      Number(amount) <= 0
+    ) {
       setMessage('Please enter a valid amount.');
+      return;
+    }
+
+    let value: bigint;
+
+    try {
+      value = parseEther(amount);
+    } catch {
+      setMessage('Invalid ETH amount.');
       return;
     }
 
     try {
       setLoading(true);
 
-      if (network === 'base') {
-        await wallet.switchChain(8453);
+      const chain = selectedNetwork.chain;
 
-        const provider = await wallet.getEthereumProvider();
+      await wallet.switchChain(chain.id);
 
-        const walletClient = createWalletClient({
-          account: wallet.address as `0x${string}`,
-          chain: base,
-          transport: custom(provider)
-        });
+      const provider = await wallet.getEthereumProvider();
 
-        const hash = await walletClient.sendTransaction({
-          account: wallet.address as `0x${string}`,
-          to: recipient as `0x${string}`,
-          value: parseEther(amount)
-        });
+      const walletClient = createWalletClient({
+        account: wallet.address as `0x${string}`,
+        chain,
+        transport: custom(provider)
+      });
 
-        setTxHash(hash);
-        setMessage('Transaction submitted. Waiting for confirmation...');
+      const hash = await walletClient.sendTransaction({
+        account: wallet.address as `0x${string}`,
+        to: recipient as `0x${string}`,
+        value
+      });
 
-        const client = createPublicClient({
-          chain: base,
-          transport: http('https://mainnet.base.org')
-        });
+      setTxHash(hash);
+      setMessage('Transaction submitted. Waiting for confirmation...');
 
-        const receipt = await client.waitForTransactionReceipt({
-          hash,
-          timeout: 120000
-        });
+      const client = createPublicClient({
+        chain,
+        transport: http(selectedNetwork.rpc)
+      });
 
-        if (receipt.status === 'success') {
-          setMessage('ETH transfer successful!');
-          setRecipient('');
-          setAmount('');
-          setShowSend(false);
-          await loadBalance();
-        } else {
-          setMessage('Transaction reverted on Base.');
-        }
-      } else {
-        const provider = await wallet.getEthereumProvider();
+      const receipt = await client.waitForTransactionReceipt({
+        hash,
+        timeout: 120000
+      });
 
-        const walletClient = createWalletClient({
-          account: wallet.address as `0x${string}`,
-          chain: mainnet,
-          transport: custom(provider)
-        });
-
-        const hash = await walletClient.sendTransaction({
-          account: wallet.address as `0x${string}`,
-          to: recipient as `0x${string}`,
-          value: parseEther(amount)
-        });
-
-        setTxHash(hash);
-        setMessage('Transaction submitted successfully.');
+      if (receipt.status === 'success') {
+        setMessage('ETH transfer successful!');
         setRecipient('');
         setAmount('');
         setShowSend(false);
-
-        setTimeout(() => loadBalance(), 5000);
+        await loadBalance();
+      } else {
+        setMessage('Transaction failed on the selected network.');
       }
     } catch (error) {
       console.error('SEND ERROR:', error);
@@ -172,10 +183,15 @@ export default function App() {
     }
   }
 
-  function copyAddress() {
-    if (address) {
-      navigator.clipboard.writeText(address);
+  async function copyAddress() {
+    if (!address) return;
+
+    try {
+      await navigator.clipboard.writeText(address);
       setMessage('Wallet address copied.');
+    } catch (error) {
+      console.error('COPY ERROR:', error);
+      setMessage('Unable to copy address. Please copy it manually.');
     }
   }
 
@@ -238,7 +254,9 @@ export default function App() {
             <Globe size={16} />
             <select
               value={network}
-              onChange={(e) => setNetwork(e.target.value as NetworkName)}
+              onChange={(e) =>
+                setNetwork(e.target.value as NetworkName)
+              }
             >
               <option value="base">Base</option>
               <option value="ethereum">Ethereum</option>
@@ -252,12 +270,17 @@ export default function App() {
             <ShieldCheck size={20} />
           </div>
 
-          <h1>{Number(balance).toFixed(6)} <small>ETH</small></h1>
-          <p className="network-label">{selectedNetwork.name} Mainnet</p>
+          <h1>
+            {Number(balance).toFixed(6)} <small>ETH</small>
+          </h1>
+
+          <p className="network-label">
+            {selectedNetwork.name} Mainnet
+          </p>
 
           <button
             className="refresh-button"
-            onClick={loadBalance}
+            onClick={() => void loadBalance()}
             disabled={refreshing}
           >
             <RefreshCw size={15} />
@@ -276,7 +299,7 @@ export default function App() {
             <b>Receive</b>
           </button>
 
-          <button onClick={copyAddress}>
+          <button onClick={() => void copyAddress()}>
             <span className="action-icon"><Copy /></span>
             <b>Copy Address</b>
           </button>
@@ -292,7 +315,10 @@ export default function App() {
             </p>
           </div>
 
-          <button className="icon-button" onClick={copyAddress}>
+          <button
+            className="icon-button"
+            onClick={() => void copyAddress()}
+          >
             <Copy size={18} />
           </button>
         </section>
@@ -303,11 +329,7 @@ export default function App() {
 
             {txHash && (
               <a
-                href={
-                  network === 'base'
-                    ? `https://basescan.org/tx/${txHash}`
-                    : `https://etherscan.io/tx/${txHash}`
-                }
+                href={`${selectedNetwork.explorer}/tx/${txHash}`}
                 target="_blank"
                 rel="noreferrer"
               >
@@ -359,7 +381,9 @@ export default function App() {
 
         <footer>
           <ShieldCheck size={15} />
-          <span>Self-custody wallet · Never share your recovery phrase</span>
+          <span>
+            Self-custody wallet - Never share your recovery phrase
+          </span>
         </footer>
 
         {showSend && (
@@ -368,6 +392,7 @@ export default function App() {
               <button
                 className="modal-close"
                 onClick={() => setShowSend(false)}
+                disabled={loading}
               >
                 <X />
               </button>
@@ -382,22 +407,26 @@ export default function App() {
                 value={recipient}
                 onChange={(e) => setRecipient(e.target.value)}
                 placeholder="0x..."
+                disabled={loading}
               />
 
               <label>Amount (ETH)</label>
               <input
                 type="number"
+                min="0"
+                step="any"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="0.01"
+                disabled={loading}
               />
 
               <button
                 className="primary-button"
-                onClick={handleSend}
+                onClick={() => void handleSend()}
                 disabled={loading}
               >
-                {loading ? 'Waiting for wallet approval...' : 'Continue'}
+                {loading ? 'Waiting for confirmation...' : 'Continue'}
               </button>
             </div>
           </div>
@@ -422,7 +451,10 @@ export default function App() {
 
               <div className="receive-address">{address}</div>
 
-              <button className="primary-button" onClick={copyAddress}>
+              <button
+                className="primary-button"
+                onClick={() => void copyAddress()}
+              >
                 <Copy size={17} /> Copy wallet address
               </button>
             </div>
@@ -431,4 +463,5 @@ export default function App() {
       </main>
     </div>
   );
-    }
+        }
+            
