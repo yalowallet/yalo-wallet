@@ -10,8 +10,7 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
-    "@privy-io/react-auth": "3.51.4",
-    
+    "@privy-io/react-auth": "3.51.3",
     "viem": "2.57.20",
     "react": "19.3.1",
     "react-dom": "19.3.1",
@@ -21,8 +20,8 @@
   "devDependencies": {
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "@vitejs/plugin-react": "latest",
-    "typescript": "latest",
+    "@vitejs/plugin-react": "6.3.0",
+    "typescript": "7.0.2",
     "vite": "8.3.8"
   }
 }
