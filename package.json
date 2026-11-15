@@ -5,9 +5,11 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview --host 0.0.0.0"
+  "dev": "vite --host 0.0.0.0",
+  "build": "tsc -b && vite build",
+  "preview": "vite preview --host 0.0.0.0",
+  "start": "vite preview --host 0.0.0.0"
+  }
   },
   "dependencies": {
     "@lifi/sdk": "^4.12.1",
