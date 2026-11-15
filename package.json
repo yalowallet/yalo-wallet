@@ -10,18 +10,18 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
-    "@privy-io/react-auth": "latest",
-    "viem": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "lucide-react": "latest",
-    "qrcode.react": "latest"
+    "@privy-io/react-auth": "^3.0.0",
+    "viem": "^2.21.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "lucide-react": "^0.468.0",
+    "qrcode.react": "^4.2.0"
   },
   "devDependencies": {
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "@vitejs/plugin-react": "latest",
-    "typescript": "latest",
-    "vite": "latest"
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.1"
   }
 }
