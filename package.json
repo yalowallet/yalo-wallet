@@ -10,9 +10,10 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
-    "@lifi/sdk": "^3.0.0",
-    "@lifi/sdk-provider-ethereum": "^3.0.0",
-    "@lifi/sdk-provider-solana": "^3.0.0",
+    "@lifi/sdk": "^4.12.1",
+    "@lifi/sdk-provider-ethereum": "^4.2.12",
+    "@lifi/sdk-provider-solana": "^4.3.7",
+    "@wallet-standard/base": "^1.1.1",
     "@privy-io/react-auth": "^2.18.1",
     "lucide-react": "^0.468.0",
     "qrcode.react": "^4.2.0",
