@@ -1,6 +1,7 @@
+
 import { useEffect, useState } from 'react';
-import { usePrivy, useWallets, useSendTransaction } from '@privy-io/react-auth';
-import { createPublicClient, formatEther, http, isAddress, parseEther } from 'viem';
+import { usePrivy, useWallets } from '@privy-io/react-auth';
+import { createPublicClient, createWalletClient, custom, formatEther, http, isAddress, parseEther } from 'viem';
 import { base, mainnet } from 'viem/chains';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -29,7 +30,6 @@ const networks = {
 export default function App() {
   const { ready, authenticated, login, logout } = usePrivy();
   const { wallets } = useWallets();
-  const { sendTransaction } = useSendTransaction();
 
   const [network, setNetwork] = useState<NetworkName>('base');
   const [balance, setBalance] = useState('0');
@@ -80,12 +80,17 @@ export default function App() {
     setMessage('');
     setTxHash('');
 
+    if (!wallet) {
+      setMessage('Wallet not found. Please reconnect.');
+      return;
+    }
+
     if (!recipient || !isAddress(recipient)) {
       setMessage('Please enter a valid wallet address.');
       return;
     }
 
-    if (!amount || Number(amount) <= 0) {
+    if (!amount || !Number.isFinite(Number(amount)) || Number(amount) <= 0) {
       setMessage('Please enter a valid amount.');
       return;
     }
@@ -93,21 +98,76 @@ export default function App() {
     try {
       setLoading(true);
 
-      const result = await sendTransaction({
-        to: recipient as `0x${string}`,
-        value: parseEther(amount),
-        chainId: selectedNetwork.chain.id
-      });
+      if (network === 'base') {
+        await wallet.switchChain(8453);
 
-      setTxHash(result.hash);
-      setMessage('Transaction submitted successfully.');
-      setRecipient('');
-      setAmount('');
-      setShowSend(false);
-      setTimeout(() => loadBalance(), 5000);
+        const provider = await wallet.getEthereumProvider();
+
+        const walletClient = createWalletClient({
+          account: wallet.address as `0x${string}`,
+          chain: base,
+          transport: custom(provider)
+        });
+
+        const hash = await walletClient.sendTransaction({
+          account: wallet.address as `0x${string}`,
+          to: recipient as `0x${string}`,
+          value: parseEther(amount)
+        });
+
+        setTxHash(hash);
+        setMessage('Transaction submitted. Waiting for confirmation...');
+
+        const client = createPublicClient({
+          chain: base,
+          transport: http('https://mainnet.base.org')
+        });
+
+        const receipt = await client.waitForTransactionReceipt({
+          hash,
+          timeout: 120000
+        });
+
+        if (receipt.status === 'success') {
+          setMessage('ETH transfer successful!');
+          setRecipient('');
+          setAmount('');
+          setShowSend(false);
+          await loadBalance();
+        } else {
+          setMessage('Transaction reverted on Base.');
+        }
+      } else {
+        const provider = await wallet.getEthereumProvider();
+
+        const walletClient = createWalletClient({
+          account: wallet.address as `0x${string}`,
+          chain: mainnet,
+          transport: custom(provider)
+        });
+
+        const hash = await walletClient.sendTransaction({
+          account: wallet.address as `0x${string}`,
+          to: recipient as `0x${string}`,
+          value: parseEther(amount)
+        });
+
+        setTxHash(hash);
+        setMessage('Transaction submitted successfully.');
+        setRecipient('');
+        setAmount('');
+        setShowSend(false);
+
+        setTimeout(() => loadBalance(), 5000);
+      }
     } catch (error) {
-      console.error(error);
-      setMessage('Transaction failed or was cancelled.');
+      console.error('SEND ERROR:', error);
+
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : 'Transaction failed or was cancelled.'
+      );
     } finally {
       setLoading(false);
     }
@@ -153,7 +213,9 @@ export default function App() {
         </div>
       </main>
     );
-  }   return (
+  }
+
+  return (
     <div className="app-container">
       <header className="topbar">
         <div className="brand">
@@ -299,73 +361,75 @@ export default function App() {
         <footer>
           <ShieldCheck size={15} />
           <span>Self-custody wallet · Never share your recovery phrase</span>
-        </footer>       {showSend && (
-        <div className="modal-overlay">
-          <div className="modal">
-            <button
-              className="modal-close"
-              onClick={() => setShowSend(false)}
-            >
-              <X />
-            </button>
+        </footer>
 
-            <h2>Send ETH</h2>
-            <p className="muted">
-              Send real ETH on {selectedNetwork.name} Mainnet.
-            </p>
+        {showSend && (
+          <div className="modal-overlay">
+            <div className="modal">
+              <button
+                className="modal-close"
+                onClick={() => setShowSend(false)}
+              >
+                <X />
+              </button>
 
-            <label>Recipient address</label>
-            <input
-              value={recipient}
-              onChange={(e) => setRecipient(e.target.value)}
-              placeholder="0x..."
-            />
+              <h2>Send ETH</h2>
+              <p className="muted">
+                Send real ETH on {selectedNetwork.name} Mainnet.
+              </p>
 
-            <label>Amount (ETH)</label>
-            <input
-              type="number"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="0.01"
-            />
+              <label>Recipient address</label>
+              <input
+                value={recipient}
+                onChange={(e) => setRecipient(e.target.value)}
+                placeholder="0x..."
+              />
 
-            <button
-              className="primary-button"
-              onClick={handleSend}
-              disabled={loading}
-            >
-              {loading ? 'Waiting for wallet approval...' : 'Continue'}
-            </button>
+              <label>Amount (ETH)</label>
+              <input
+                type="number"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="0.01"
+              />
+
+              <button
+                className="primary-button"
+                onClick={handleSend}
+                disabled={loading}
+              >
+                {loading ? 'Waiting for wallet approval...' : 'Continue'}
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {showReceive && (
-        <div className="modal-overlay">
-          <div className="modal receive-modal">
-            <button
-              className="modal-close"
-              onClick={() => setShowReceive(false)}
-            >
-              <X />
-            </button>
+        {showReceive && (
+          <div className="modal-overlay">
+            <div className="modal receive-modal">
+              <button
+                className="modal-close"
+                onClick={() => setShowReceive(false)}
+              >
+                <X />
+              </button>
 
-            <h2>Receive ETH</h2>
-            <p className="muted">
-              Send ETH to this address on {selectedNetwork.name} Mainnet.
-            </p>
+              <h2>Receive ETH</h2>
+              <p className="muted">
+                Send ETH to this address on {selectedNetwork.name} Mainnet.
+              </p>
 
-            {address && <QRCodeSVG value={address} size={180} />}
+              {address && <QRCodeSVG value={address} size={180} />}
 
-            <div className="receive-address">{address}</div>
+              <div className="receive-address">{address}</div>
 
-            <button className="primary-button" onClick={copyAddress}>
-              <Copy size={17} /> Copy wallet address
-            </button>
+              <button className="primary-button" onClick={copyAddress}>
+                <Copy size={17} /> Copy wallet address
+              </button>
+            </div>
           </div>
-        </div>
-      )}
-    </main>
-  </div>
-);
-} 
+        )}
+      </main>
+    </div>
+  );
+}
