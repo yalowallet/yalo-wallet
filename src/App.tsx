@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from 'react';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { createPublicClient, createWalletClient, custom, formatEther, http, isAddress, parseEther } from 'viem';
@@ -432,4 +431,4 @@ export default function App() {
       </main>
     </div>
   );
-}
+    }
