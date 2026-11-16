@@ -1,4 +1,3 @@
-
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
@@ -146,6 +145,32 @@ function isValidAmount(value: string) {
   return Number.isFinite(number) && number > 0;
 }
 
+function encodeBase58(bytes: Uint8Array): string {
+  const alphabet =
+    '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+  let value = 0n;
+
+  for (const byte of bytes) {
+    value = (value * 256n) + BigInt(byte);
+  }
+
+  let encoded = '';
+
+  while (value > 0n) {
+    const remainder = Number(value % 58n);
+    encoded = alphabet[remainder] + encoded;
+    value = value / 58n;
+  }
+
+  for (const byte of bytes) {
+    if (byte !== 0) break;
+    encoded = '1' + encoded;
+  }
+
+  return encoded || '1';
+}
+
 export default function App() {
   const {
     ready,
@@ -233,6 +258,7 @@ export default function App() {
       [activity, ...previous].slice(0, 50)
     );
   }, []);
+    
   const refreshBalance = useCallback(async () => {
     if (!authenticated) return;
 
@@ -309,7 +335,6 @@ export default function App() {
         });
 
         setBalance(formatEther(rawBalance));
-        setTokens([]);
       }
     } catch (err) {
       showError(getError(err));
@@ -572,71 +597,60 @@ export default function App() {
     showSuccess,
     refreshBalance
   ]);
-  
-  const sendSol = useCallback(async () => {
+    
+  const sendSolana = useCallback(async () => {
     if (!solWallet || !solAddress) {
       showError('Solana wallet is not connected.');
       return;
     }
 
-    if (!isValidAmount(amount)) {
-      showError('Enter a valid SOL amount.');
-      return;
-    }
-
-    if (!recipient) {
-      showError('Enter a recipient address.');
-      return;
-    }
-
     try {
+      if (!isValidAmount(amount)) {
+        showError('Enter a valid SOL amount.');
+        return;
+      }
+
+      let recipientKey: PublicKey;
+
+      try {
+        recipientKey = new PublicKey(recipient);
+      } catch {
+        showError('Enter a valid Solana address.');
+        return;
+      }
+
       setLoading(true);
       setError('');
       setMessage('');
 
-      const sender = new PublicKey(solAddress);
-      const destination = new PublicKey(recipient);
-
       const connection = new Connection(SOLANA_RPC);
+      const senderKey = new PublicKey(solAddress);
 
       const transaction = new Transaction().add(
         SystemProgram.transfer({
-          fromPubkey: sender,
-          toPubkey: destination,
+          fromPubkey: senderKey,
+          toPubkey: recipientKey,
           lamports: Math.round(Number(amount) * 1e9)
         })
       );
 
-      transaction.feePayer = sender;
-
       const latestBlockhash =
-        await connection.getLatestBlockhash();
+        await connection.getLatestBlockhash('confirmed');
 
-      transaction.recentBlockhash =
-        latestBlockhash.blockhash;
+      transaction.recentBlockhash = latestBlockhash.blockhash;
+      transaction.feePayer = senderKey;
 
       const serialized = transaction.serialize({
         requireAllSignatures: false,
         verifySignatures: false
       });
 
-      let binary = '';
-
-      for (let i = 0; i < serialized.length; i++) {
-        binary += String.fromCharCode(serialized[i]);
-      }
-
-      const transactionBase64 = btoa(binary);
-
       const result = await signAndSendTransaction({
-        transaction: transactionBase64,
+        transaction: serialized,
         wallet: solWallet
       });
 
-      const signature =
-        typeof result === 'string'
-          ? result
-          : result.signature;
+      const signature = encodeBase58(result.signature);
 
       addActivity({
         hash: signature,
@@ -651,7 +665,7 @@ export default function App() {
       setRecipient('');
       setModal(null);
 
-      showSuccess('SOL transfer submitted.');
+      showSuccess('Solana transaction submitted.');
       void refreshBalance();
     } catch (err) {
       showError(getError(err));
@@ -673,7 +687,7 @@ export default function App() {
   const sendTron = useCallback(async () => {
     const tron = window.tronWeb;
 
-    if (!tron?.defaultAddress?.base58) {
+    if (!tronConnected || !tron?.defaultAddress?.base58) {
       showError('Connect your TronLink wallet first.');
       return;
     }
@@ -693,19 +707,25 @@ export default function App() {
       setError('');
       setMessage('');
 
-      const sun = Math.round(Number(amount) * 1e6);
+      const sender = tron.defaultAddress.base58;
 
-      const result =
-        await tron.trx.sendTransaction(recipient, sun);
+      const sunAmount = Math.floor(Number(amount) * 1e6);
 
-      if (!result?.txid) {
-        throw new Error(
-          'TRON transaction was not confirmed by wallet.'
-        );
+      const result = await tron.trx.sendTransaction(
+        recipient,
+        sunAmount
+      );
+
+      const hash =
+        result?.txid ||
+        result?.transaction?.txID;
+
+      if (!hash) {
+        throw new Error('TRON transaction hash was not returned.');
       }
 
       addActivity({
-        hash: result.txid,
+        hash,
         type: 'Send',
         amount,
         symbol: 'TRX',
@@ -717,7 +737,7 @@ export default function App() {
       setRecipient('');
       setModal(null);
 
-      showSuccess('TRX transfer submitted.');
+      showSuccess('TRON transaction submitted.');
       void refreshBalance();
     } catch (err) {
       showError(getError(err));
@@ -725,6 +745,7 @@ export default function App() {
       setLoading(false);
     }
   }, [
+    tronConnected,
     recipient,
     amount,
     addActivity,
@@ -732,36 +753,10 @@ export default function App() {
     showSuccess,
     refreshBalance
   ]);
-
-  const handleSend = useCallback(async () => {
-    if (network === 'solana') {
-      await sendSol();
-      return;
-    }
-
-    if (network === 'tron') {
-      await sendTron();
-      return;
-    }
-
-    if (selectedToken) {
-      await sendEvmToken();
-      return;
-    }
-
-    await sendEvmNative();
-  }, [
-    network,
-    selectedToken,
-    sendSol,
-    sendTron,
-    sendEvmToken,
-    sendEvmNative
-  ]);
   
   const addEvmToken = useCallback(async () => {
     if (!publicClient || !evmAddress) {
-      showError('EVM wallet is not connected.');
+      showError('Connect your EVM wallet first.');
       return;
     }
 
@@ -775,27 +770,27 @@ export default function App() {
       setError('');
       setMessage('');
 
-      const contract = tokenAddress as `0x${string}`;
+      const address = tokenAddress as `0x${string}`;
 
-      const [symbol, decimals, name, rawBalance] =
+      const [name, symbol, decimals, rawBalance] =
         await Promise.all([
           publicClient.readContract({
-            address: contract,
-            abi: erc20Abi,
-            functionName: 'symbol'
-          }),
-          publicClient.readContract({
-            address: contract,
-            abi: erc20Abi,
-            functionName: 'decimals'
-          }),
-          publicClient.readContract({
-            address: contract,
+            address,
             abi: erc20Abi,
             functionName: 'name'
           }),
           publicClient.readContract({
-            address: contract,
+            address,
+            abi: erc20Abi,
+            functionName: 'symbol'
+          }),
+          publicClient.readContract({
+            address,
+            abi: erc20Abi,
+            functionName: 'decimals'
+          }),
+          publicClient.readContract({
+            address,
             abi: erc20Abi,
             functionName: 'balanceOf',
             args: [evmAddress as `0x${string}`]
@@ -803,9 +798,9 @@ export default function App() {
         ]);
 
       const newToken: Token = {
-        symbol,
         name,
-        address: contract,
+        symbol,
+        address,
         decimals,
         balance: formatUnits(rawBalance, decimals)
       };
@@ -813,18 +808,10 @@ export default function App() {
       setTokens(previous => {
         const exists = previous.some(
           token =>
-            token.address.toLowerCase() ===
-            contract.toLowerCase()
+            token.address.toLowerCase() === address.toLowerCase()
         );
 
-        if (exists) {
-          return previous.map(token =>
-            token.address.toLowerCase() ===
-            contract.toLowerCase()
-              ? newToken
-              : token
-          );
-        }
+        if (exists) return previous;
 
         return [...previous, newToken];
       });
@@ -834,9 +821,7 @@ export default function App() {
 
       showSuccess(`${symbol} token added successfully.`);
     } catch (err) {
-      showError(
-        `Unable to read token contract: ${getError(err)}`
-      );
+      showError(getError(err));
     } finally {
       setLoading(false);
     }
@@ -849,30 +834,24 @@ export default function App() {
   ]);
 
   const refreshTokenBalances = useCallback(async () => {
-    if (!publicClient || !evmAddress) return;
+    if (!publicClient || !evmAddress || tokens.length === 0) {
+      return;
+    }
 
     try {
       const updatedTokens = await Promise.all(
         tokens.map(async token => {
-          try {
-            const rawBalance =
-              await publicClient.readContract({
-                address: token.address as `0x${string}`,
-                abi: erc20Abi,
-                functionName: 'balanceOf',
-                args: [evmAddress as `0x${string}`]
-              });
+          const rawBalance = await publicClient.readContract({
+            address: token.address as `0x${string}`,
+            abi: erc20Abi,
+            functionName: 'balanceOf',
+            args: [evmAddress as `0x${string}`]
+          });
 
-            return {
-              ...token,
-              balance: formatUnits(
-                rawBalance,
-                token.decimals
-              )
-            };
-          } catch {
-            return token;
-          }
+          return {
+            ...token,
+            balance: formatUnits(rawBalance, token.decimals)
+          };
         })
       );
 
@@ -891,150 +870,186 @@ export default function App() {
     setTokens(previous =>
       previous.filter(
         token =>
-          token.address.toLowerCase() !==
-          address.toLowerCase()
+          token.address.toLowerCase() !== address.toLowerCase()
       )
     );
 
-    showSuccess('Token removed from your wallet display.');
+    setSelectedToken(previous =>
+      previous?.address.toLowerCase() === address.toLowerCase()
+        ? null
+        : previous
+    );
+
+    showSuccess('Token removed from your list.');
   }, [showSuccess]);
 
-  const openSendModal = useCallback((token?: Token) => {
-    setSelectedToken(token || null);
+  const handleSend = useCallback(async () => {
+    if (network === 'solana') {
+      await sendSolana();
+      return;
+    }
+
+    if (network === 'tron') {
+      await sendTron();
+      return;
+    }
+
+    if (selectedToken) {
+      await sendEvmToken();
+      return;
+    }
+
+    await sendEvmNative();
+  }, [
+    network,
+    selectedToken,
+    sendSolana,
+    sendTron,
+    sendEvmToken,
+    sendEvmNative
+  ]);
+
+  const openSendModal = useCallback(() => {
     setRecipient('');
     setAmount('');
-    setModal('send');
+    setSelectedToken(null);
     setError('');
     setMessage('');
+    setModal('send');
   }, []);
 
   const openReceiveModal = useCallback(() => {
-    setModal('receive');
     setError('');
     setMessage('');
+    setModal('receive');
+  }, []);
+
+  const openTokenModal = useCallback(() => {
+    setTokenAddress('');
+    setError('');
+    setMessage('');
+    setModal('token');
   }, []);
 
   const closeModal = useCallback(() => {
-    if (loading) return;
-
     setModal(null);
+    setError('');
+    setMessage('');
     setRecipient('');
     setAmount('');
     setTokenAddress('');
     setSelectedToken(null);
-  }, [loading]);
-    
+  }, []);
+
   return (
-    <div className="min-h-screen bg-[#090b0a] text-white">
-      <div className="mx-auto flex min-h-screen max-w-[1500px]">
-        <aside className="hidden w-64 shrink-0 border-r border-white/10 bg-[#0d100e] p-6 lg:flex lg:flex-col">
+    <div className="min-h-screen bg-[#080b09] text-white">
+      <div className="mx-auto flex min-h-screen max-w-[1600px]">
+        <aside className="hidden w-64 shrink-0 border-r border-white/10 bg-[#0c100d] p-5 md:flex md:flex-col">
           <div className="mb-10 flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-yellow-400 text-black">
-              <Wallet size={25} />
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-lime-400 text-black">
+              <Wallet size={24} />
             </div>
             <div>
-              <h1 className="text-2xl font-black tracking-wide">YALO</h1>
-              <p className="text-xs text-gray-500">WALLET</p>
+              <h1 className="text-xl font-bold tracking-wide">YALO</h1>
+              <p className="text-xs text-gray-500">Digital Wallet</p>
             </div>
           </div>
 
-          <nav className="flex-1 space-y-2">
-            {[
-              { name: 'Overview', icon: Wallet },
-              { name: 'Tokens', icon: Coins },
-              { name: 'Activity', icon: History },
-              { name: 'Settings', icon: Settings }
-            ].map(item => {
-              const Icon = item.icon;
+          {authenticated && (
+            <>
+              <nav className="space-y-2">
+                {[
+                  { name: 'Overview', icon: Wallet },
+                  { name: 'Tokens', icon: Coins },
+                  { name: 'Activity', icon: History },
+                  { name: 'Settings', icon: Settings }
+                ].map(item => {
+                  const Icon = item.icon;
 
-              return (
-                <button
-                  key={item.name}
-                  onClick={() => setActiveTab(item.name)}
-                  className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left transition ${
-                    activeTab === item.name
-                      ? 'bg-yellow-400 font-bold text-black'
-                      : 'text-gray-400 hover:bg-white/5 hover:text-white'
-                  }`}
-                >
-                  <Icon size={19} />
-                  {item.name}
-                </button>
-              );
-            })}
-          </nav>
+                  return (
+                    <button
+                      key={item.name}
+                      onClick={() => {
+                        setActiveTab(item.name);
+                        setMenuOpen(false);
+                      }}
+                      className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left transition ${
+                        activeTab === item.name
+                          ? 'bg-lime-400 text-black'
+                          : 'text-gray-400 hover:bg-white/5 hover:text-white'
+                      }`}
+                    >
+                      <Icon size={19} />
+                      <span className="font-medium">{item.name}</span>
+                    </button>
+                  );
+                })}
+              </nav>
 
-          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-            <div className="mb-2 flex items-center gap-2 text-yellow-400">
-              <ShieldCheck size={18} />
-              <span className="text-sm font-semibold">
-                Wallet Security
-              </span>
-            </div>
-            <p className="text-xs leading-5 text-gray-500">
-              Keep your wallet credentials private. Never share your recovery information.
-            </p>
-          </div>
+              <div className="mt-auto rounded-2xl border border-white/10 bg-[#121813] p-4">
+                <div className="mb-2 flex items-center gap-2 text-lime-400">
+                  <ShieldCheck size={18} />
+                  <span className="text-sm font-semibold">Secure Wallet</span>
+                </div>
+                <p className="text-xs leading-5 text-gray-500">
+                  Your wallet access is protected by Privy authentication.
+                </p>
+              </div>
+            </>
+          )}
         </aside>
 
         <main className="min-w-0 flex-1">
-          <header className="sticky top-0 z-30 flex items-center justify-between border-b border-white/10 bg-[#090b0a]/95 px-4 py-4 backdrop-blur md:px-8">
+          <header className="flex items-center justify-between border-b border-white/10 px-4 py-4 sm:px-7">
             <div className="flex items-center gap-3">
               <button
                 onClick={() => setMenuOpen(!menuOpen)}
-                className="rounded-lg border border-white/10 p-2 lg:hidden"
-                aria-label="Open menu"
+                className="rounded-lg p-2 text-gray-400 hover:bg-white/10 md:hidden"
               >
-                {menuOpen ? <X size={20} /> : <Menu size={20} />}
+                {menuOpen ? <X size={21} /> : <Menu size={21} />}
               </button>
 
-              <div className="lg:hidden">
-                <h1 className="text-xl font-black">YALO</h1>
-                <p className="text-[10px] tracking-widest text-gray-500">
-                  WALLET
-                </p>
-              </div>
-
-              <div className="hidden lg:block">
-                <h2 className="text-xl font-bold">{activeTab}</h2>
+              <div>
+                <h2 className="text-lg font-bold">YALO Wallet</h2>
                 <p className="text-xs text-gray-500">
-                  Manage your digital assets
+                  Secure digital asset management
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <select
-                value={network}
-                onChange={event => {
-                  setNetwork(event.target.value as NetworkKey);
-                  setSelectedToken(null);
-                }}
-                className="max-w-[145px] rounded-xl border border-white/10 bg-[#151916] px-3 py-2 text-sm outline-none focus:border-yellow-400"
-              >
-                <option value="base">Base</option>
-                <option value="ethereum">Ethereum</option>
-                <option value="arbitrum">Arbitrum</option>
-                <option value="optimism">Optimism</option>
-                <option value="polygon">Polygon</option>
-                <option value="solana">Solana</option>
-                <option value="tron">TRON</option>
-              </select>
-
-              {authenticated && (
+            {authenticated ? (
+              <div className="flex items-center gap-2">
+                <span className="hidden text-xs text-gray-400 sm:inline">
+                  {shortAddress(currentAddress)}
+                </span>
+                <button
+                  onClick={() => void copyAddress()}
+                  className="rounded-lg border border-white/10 p-2 text-gray-400 hover:text-lime-400"
+                  title="Copy wallet address"
+                >
+                  <Copy size={17} />
+                </button>
                 <button
                   onClick={() => void logout()}
-                  className="rounded-xl border border-white/10 p-2 text-gray-400 hover:text-red-400"
+                  className="rounded-lg border border-white/10 p-2 text-gray-400 hover:text-red-400"
                   title="Log out"
                 >
-                  <LogOut size={19} />
+                  <LogOut size={17} />
                 </button>
-              )}
-            </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => login()}
+                disabled={!ready}
+                className="rounded-xl bg-lime-400 px-5 py-2.5 text-sm font-bold text-black hover:bg-lime-300 disabled:opacity-50"
+              >
+                Connect Wallet
+              </button>
+            )}
           </header>
 
-          {menuOpen && (
-            <div className="border-b border-white/10 bg-[#111512] p-4 lg:hidden">
+          {menuOpen && authenticated && (
+            <div className="border-b border-white/10 bg-[#0c100d] p-4 md:hidden">
               {[
                 { name: 'Overview', icon: Wallet },
                 { name: 'Tokens', icon: Coins },
@@ -1050,9 +1065,9 @@ export default function App() {
                       setActiveTab(item.name);
                       setMenuOpen(false);
                     }}
-                    className={`flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left ${
+                    className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 ${
                       activeTab === item.name
-                        ? 'text-yellow-400'
+                        ? 'bg-lime-400 text-black'
                         : 'text-gray-400'
                     }`}
                   >
@@ -1064,373 +1079,372 @@ export default function App() {
             </div>
           )}
 
-          <div className="p-4 md:p-8">
-            {!ready ? (
-              <div className="flex min-h-[60vh] items-center justify-center">
-                <div className="text-center">
-                  <RefreshCw
-                    className="mx-auto mb-3 animate-spin text-yellow-400"
-                    size={30}
-                  />
-                  <p className="text-gray-400">
-                    Loading YALO Wallet...
-                  </p>
+          {!authenticated ? (
+            <div className="flex min-h-[75vh] items-center justify-center px-5">
+              <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#101611] p-8 text-center">
+                <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-3xl bg-lime-400 text-black">
+                  <Wallet size={38} />
                 </div>
+
+                <h2 className="mb-3 text-3xl font-bold">
+                  Welcome to YALO
+                </h2>
+
+                <p className="mb-8 text-sm leading-6 text-gray-400">
+                  Connect your wallet to manage your digital assets,
+                  send and receive crypto, and view your transactions.
+                </p>
+
+                <button
+                  onClick={() => login()}
+                  disabled={!ready}
+                  className="w-full rounded-xl bg-lime-400 py-3 font-bold text-black hover:bg-lime-300 disabled:opacity-50"
+                >
+                  {ready ? 'Connect Wallet' : 'Loading...'}
+                </button>
+
+                <p className="mt-5 text-xs text-gray-600">
+                  Powered by Privy wallet authentication
+                </p>
               </div>
-            ) : !authenticated ? (
-              <div className="flex min-h-[70vh] items-center justify-center">
-                <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#111512] p-8 text-center">
-                  <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-yellow-400 text-black">
-                    <Wallet size={34} />
-                  </div>
-
-                  <h2 className="mb-2 text-3xl font-black">
-                    Welcome to YALO
-                  </h2>
-                  <p className="mb-7 text-sm leading-6 text-gray-400">
-                    Your multi-chain wallet for managing digital assets.
-                  </p>
-
-                  <button
-                    onClick={() => login()}
-                    className="w-full rounded-xl bg-yellow-400 px-5 py-4 font-bold text-black transition hover:bg-yellow-300"
-                  >
-                    Connect Wallet
-                  </button>
-
-                  <p className="mt-5 text-xs text-gray-600">
-                    Secure wallet access powered by Privy
-                  </p>
+            </div>
+          ) : (
+            <div className="p-4 sm:p-7">
+              {message && (
+                <div className="mb-5 flex items-center gap-2 rounded-xl border border-green-500/20 bg-green-500/10 p-3 text-sm text-green-400">
+                  <CheckCircle size={18} />
+                  {message}
                 </div>
-              </div>
-            ) : (
-              <>
-                {(message || error) && (
-                  <div className={`mb-5 flex items-start gap-3 rounded-xl border p-4 ${
-                    error
-                      ? 'border-red-500/30 bg-red-500/10 text-red-300'
-                      : 'border-green-500/30 bg-green-500/10 text-green-300'
-                  }`}>
-                    {error ? (
-                      <AlertCircle size={19} className="mt-0.5 shrink-0" />
-                    ) : (
-                      <CheckCircle size={19} className="mt-0.5 shrink-0" />
-                    )}
-                    <p className="flex-1 break-words text-sm">
-                      {error || message}
-                    </p>
-                    <button
-                      onClick={() => {
-                        setError('');
-                        setMessage('');
-                      }}
-                      aria-label="Close message"
-                    >
-                      <X size={17} />
-                    </button>
+              )}
+
+              {error && (
+                <div className="mb-5 flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">
+                  <AlertCircle size={18} />
+                  <span className="break-words">{error}</span>
+                </div>
+              )}
+
+              {activeTab === 'Overview' && (
+                <div className="space-y-6">
+                  <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+                    <div>
+                      <h2 className="text-2xl font-bold">Overview</h2>
+                      <p className="mt-1 text-sm text-gray-500">
+                        Manage your wallet and assets
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => void refreshBalance()}
+                        disabled={refreshing}
+                        className="flex items-center gap-2 rounded-xl border border-white/10 px-4 py-2.5 text-sm text-gray-300 hover:bg-white/5 disabled:opacity-50"
+                      >
+                        <RefreshCw
+                          size={16}
+                          className={refreshing ? 'animate-spin' : ''}
+                        />
+                        Refresh
+                      </button>
+
+                      <button
+                        onClick={openReceiveModal}
+                        className="flex items-center gap-2 rounded-xl border border-white/10 px-4 py-2.5 text-sm hover:bg-white/5"
+                      >
+                        <ArrowDownLeft size={16} />
+                        Receive
+                      </button>
+
+                      <button
+                        onClick={openSendModal}
+                        className="flex items-center gap-2 rounded-xl bg-lime-400 px-4 py-2.5 text-sm font-bold text-black hover:bg-lime-300"
+                      >
+                        <Send size={16} />
+                        Send
+                      </button>
+                    </div>
                   </div>
-                )}
 
-                {activeTab === 'Overview' && (
-                  <div className="space-y-6">
-                    <section className="rounded-3xl bg-gradient-to-br from-yellow-300 to-yellow-500 p-6 text-black md:p-8">
-                      <div className="flex flex-wrap items-start justify-between gap-4">
-                        <div>
-                          <p className="text-sm font-medium text-black/70">
-                            Total wallet balance
-                          </p>
-
-                          <div className="mt-3 flex items-center gap-3">
-                            <h2 className="text-3xl font-black md:text-4xl">
-                              {showBalance
-                                ? `${Number(balance || 0).toFixed(5)} ${nativeSymbol}`
-                                : '••••••••'}
-                            </h2>
-
-                            <button
-                              onClick={() => setShowBalance(!showBalance)}
-                              aria-label="Toggle balance visibility"
-                            >
-                              {showBalance ? (
-                                <EyeOff size={20} />
-                              ) : (
-                                <Eye size={20} />
-                              )}
-                            </button>
-                          </div>
-
-                          <p className="mt-3 text-xs text-black/60">
-                            {networkName} network
-                          </p>
-                        </div>
-
-                        <button
-                          onClick={() => void refreshBalance()}
-                          disabled={refreshing}
-                          className="rounded-xl bg-black/10 p-3 transition hover:bg-black/20 disabled:opacity-50"
-                          title="Refresh balance"
-                        >
-                          <RefreshCw
-                            size={21}
-                            className={refreshing ? 'animate-spin' : ''}
-                          />
-                        </button>
-                      </div>
-
-                      <div className="mt-8 grid grid-cols-2 gap-3">
-                        <button
-                          onClick={() => openSendModal()}
-                          className="flex items-center justify-center gap-2 rounded-xl bg-black px-4 py-3 font-bold text-white transition hover:bg-black/80"
-                        >
-                          <ArrowUpRight size={19} />
-                          Send
-                        </button>
-
-                        <button
-                          onClick={openReceiveModal}
-                          className="flex items-center justify-center gap-2 rounded-xl border border-black/20 bg-white/30 px-4 py-3 font-bold transition hover:bg-white/50"
-                        >
-                          <ArrowDownLeft size={19} />
-                          Receive
-                        </button>
-                      </div>
-                    </section>
-
-                    <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                      <div className="rounded-2xl border border-white/10 bg-[#111512] p-5">
-                        <div className="mb-3 flex items-center justify-between">
-                          <span className="text-sm text-gray-400">
-                            Active network
-                          </span>
-                          <Globe className="text-yellow-400" size={20} />
-                        </div>
-                        <p className="text-xl font-bold">{networkName}</p>
-                        <p className="mt-1 text-xs text-gray-500">
-                          {network === 'tron'
-                            ? tronConnected
-                              ? 'TronLink connected'
-                              : 'TronLink not connected'
-                            : currentAddress
-                              ? 'Wallet connected'
-                              : 'Wallet address unavailable'}
-                        </p>
-                      </div>
-
-                      <div className="rounded-2xl border border-white/10 bg-[#111512] p-5">
-                        <div className="mb-3 flex items-center justify-between">
-                          <span className="text-sm text-gray-400">
-                            Wallet address
-                          </span>
-                          <Copy className="text-yellow-400" size={19} />
-                        </div>
-                        <p className="break-all text-sm font-semibold">
-                          {currentAddress
-                            ? shortAddress(currentAddress)
-                            : 'Not connected'}
-                        </p>
-                        <button
-                          onClick={() => void copyAddress()}
-                          disabled={!currentAddress}
-                          className="mt-2 text-xs font-semibold text-yellow-400 disabled:opacity-40"
-                        >
-                          Copy address
-                        </button>
-                      </div>
-                    </section>
-
-                    <section className="rounded-2xl border border-white/10 bg-[#111512] p-5">
-                      <div className="mb-5 flex items-center justify-between">
-                        <h3 className="text-lg font-bold">Your tokens</h3>
-                        <button
-                          onClick={() => setActiveTab('Tokens')}
-                          className="text-sm text-yellow-400"
-                        >
-                          View all
-                        </button>
-                      </div>
-
-                      {tokens.length === 0 ? (
-                        <p className="py-5 text-center text-sm text-gray-500">
-                          No additional tokens added on this network.
-                        </p>
-                      ) : (
-                        <div className="space-y-3">
-                          {tokens.slice(0, 4).map(token => (
-                            <div
-                              key={token.address}
-                              className="flex items-center justify-between gap-3 border-b border-white/5 pb-3 last:border-0"
-                            >
-                              <div className="min-w-0">
-                                <p className="font-semibold">{token.symbol}</p>
-                                <p className="truncate text-xs text-gray-500">
-                                  {token.name}
-                                </p>
-                              </div>
-                              <p className="text-sm font-semibold">
-                                {Number(token.balance).toFixed(5)}
-                              </p>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </section>
-                  </div>
-                )}
-      
-                {activeTab === 'Tokens' && (
-                  <section className="rounded-2xl border border-white/10 bg-[#111512] p-5">
-                    <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                  <div className="rounded-3xl border border-white/10 bg-gradient-to-br from-[#18251a] to-[#0d120e] p-6 sm:p-8">
+                    <div className="mb-6 flex items-center justify-between">
                       <div>
-                        <h2 className="text-xl font-bold">Tokens</h2>
-                        <p className="mt-1 text-xs text-gray-500">
-                          Assets on {networkName}
+                        <p className="text-sm text-gray-400">
+                          Available Balance
                         </p>
+                        <div className="mt-3 flex items-center gap-3">
+                          <h3 className="break-all text-3xl font-bold sm:text-4xl">
+                            {showBalance
+                              ? `${Number(balance).toLocaleString(undefined, {
+                                  maximumFractionDigits: 6
+                                })} ${nativeSymbol}`
+                              : '••••••••'}
+                          </h3>
+
+                          <button
+                            onClick={() => setShowBalance(!showBalance)}
+                            className="text-gray-400 hover:text-lime-400"
+                          >
+                            {showBalance
+                              ? <EyeOff size={19} />
+                              : <Eye size={19} />}
+                          </button>
+                        </div>
                       </div>
 
-                      <div className="flex gap-2">
-                        {isEvm && (
-                          <button
-                            onClick={() => setModal('token')}
-                            className="flex items-center gap-2 rounded-xl bg-yellow-400 px-4 py-2.5 text-sm font-bold text-black"
-                          >
-                            <Plus size={17} />
-                            Add token
-                          </button>
-                        )}
-
-                        {isEvm && (
-                          <button
-                            onClick={() => void refreshTokenBalances()}
-                            className="rounded-xl border border-white/10 p-2.5 text-yellow-400"
-                            title="Refresh token balances"
-                          >
-                            <RefreshCw size={18} />
-                          </button>
-                        )}
+                      <div className="hidden h-14 w-14 items-center justify-center rounded-2xl bg-lime-400/10 text-lime-400 sm:flex">
+                        <Coins size={28} />
                       </div>
                     </div>
 
-                    <div className="mb-4 rounded-xl border border-white/10 bg-black/20 p-4">
-                      <p className="text-xs text-gray-500">Native asset</p>
-                      <div className="mt-2 flex items-center justify-between">
-                        <div>
-                          <p className="font-bold">{nativeSymbol}</p>
-                          <p className="text-xs text-gray-500">
-                            {networkName}
-                          </p>
-                        </div>
-                        <p className="font-bold">
-                          {showBalance
-                            ? Number(balance).toFixed(6)
-                            : '••••••'}
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-5">
+                      <div>
+                        <p className="text-xs text-gray-500">Wallet Address</p>
+                        <p className="mt-1 font-mono text-sm text-gray-300">
+                          {shortAddress(currentAddress)}
                         </p>
                       </div>
+
+                      <button
+                        onClick={() => void copyAddress()}
+                        className="flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs hover:border-lime-400/50"
+                      >
+                        <Copy size={14} />
+                        Copy Address
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/10 bg-[#101611] p-5">
+                    <div className="mb-4 flex items-center justify-between">
+                      <h3 className="font-semibold">Select Network</h3>
+                      <Globe size={18} className="text-lime-400" />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      {[
+                        { key: 'base', name: 'Base' },
+                        { key: 'ethereum', name: 'Ethereum' },
+                        { key: 'arbitrum', name: 'Arbitrum' },
+                        { key: 'optimism', name: 'Optimism' },
+                        { key: 'polygon', name: 'Polygon' },
+                        { key: 'solana', name: 'Solana' },
+                        { key: 'tron', name: 'TRON' }
+                      ].map(item => (
+                        <button
+                          key={item.key}
+                          onClick={() => {
+                            setNetwork(item.key as NetworkKey);
+                            setError('');
+                            setMessage('');
+                          }}
+                          className={`rounded-xl border px-3 py-3 text-sm font-medium transition ${
+                            network === item.key
+                              ? 'border-lime-400 bg-lime-400/10 text-lime-400'
+                              : 'border-white/10 text-gray-400 hover:border-white/30'
+                          }`}
+                        >
+                          {item.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="rounded-2xl border border-white/10 bg-[#101611] p-5">
+                      <div className="mb-3 flex items-center gap-2 text-gray-400">
+                        <Coins size={18} />
+                        <span className="text-sm">Network</span>
+                      </div>
+                      <p className="text-xl font-bold">{networkName}</p>
+                      <p className="mt-1 text-xs text-gray-500">
+                        Current active network
+                      </p>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-[#101611] p-5">
+                      <div className="mb-3 flex items-center gap-2 text-gray-400">
+                        <History size={18} />
+                        <span className="text-sm">Transactions</span>
+                      </div>
+                      <p className="text-xl font-bold">
+                        {activities.length}
+                      </p>
+                      <p className="mt-1 text-xs text-gray-500">
+                        Recent activity on this session
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {activeTab === 'Tokens' && (
+                <div className="space-y-6">
+                  <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                    <div>
+                      <h2 className="text-2xl font-bold">My Tokens</h2>
+                      <p className="mt-1 text-sm text-gray-500">
+                        View and manage your token balances
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={openTokenModal}
+                      disabled={!isEvm}
+                      className="flex items-center justify-center gap-2 rounded-xl bg-lime-400 px-4 py-3 text-sm font-bold text-black hover:bg-lime-300 disabled:opacity-40"
+                    >
+                      <Plus size={17} />
+                      Add Token
+                    </button>
+                  </div>
+
+                  {!isEvm && (
+                    <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/10 p-4 text-sm text-yellow-400">
+                      Custom ERC-20 tokens can be added on EVM networks.
+                    </div>
+                  )}
+
+                  <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#101611]">
+                    <div className="flex items-center justify-between border-b border-white/10 p-5">
+                      <h3 className="font-semibold">Token List</h3>
+
+                      <button
+                        onClick={() => void refreshTokenBalances()}
+                        disabled={refreshing}
+                        className="flex items-center gap-2 text-sm text-gray-400 hover:text-lime-400"
+                      >
+                        <RefreshCw
+                          size={15}
+                          className={refreshing ? 'animate-spin' : ''}
+                        />
+                        Refresh
+                      </button>
                     </div>
 
                     {tokens.length === 0 ? (
-                      <p className="py-8 text-center text-sm text-gray-500">
-                        No additional tokens added.
-                      </p>
+                      <div className="p-10 text-center">
+                        <Coins
+                          size={36}
+                          className="mx-auto mb-3 text-gray-600"
+                        />
+                        <p className="font-medium text-gray-300">
+                          No tokens added
+                        </p>
+                        <p className="mt-2 text-sm text-gray-500">
+                          Add a token contract to display its balance.
+                        </p>
+                      </div>
                     ) : (
-                      <div className="space-y-3">
+                      <div className="divide-y divide-white/10">
                         {tokens.map(token => (
                           <div
                             key={token.address}
-                            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/5 p-4"
+                            className="flex flex-wrap items-center justify-between gap-3 p-5"
                           >
                             <div className="min-w-0">
-                              <p className="font-bold">{token.symbol}</p>
-                              <p className="truncate text-xs text-gray-500">
+                              <p className="font-semibold">
+                                {token.symbol}
+                              </p>
+                              <p className="text-xs text-gray-500">
                                 {token.name}
                               </p>
-                              <p className="mt-1 break-all text-[10px] text-gray-600">
-                                {token.address}
+                              <p className="mt-1 break-all font-mono text-xs text-gray-600">
+                                {shortAddress(token.address)}
                               </p>
                             </div>
 
-                            <div className="text-right">
-                              <p className="font-semibold">
-                                {showBalance
-                                  ? Number(token.balance).toFixed(6)
-                                  : '••••••'}
+                            <div className="flex items-center gap-3">
+                              <p className="text-right font-semibold">
+                                {Number(token.balance).toLocaleString(
+                                  undefined,
+                                  { maximumFractionDigits: 6 }
+                                )}
                               </p>
 
-                              {isEvm && (
-                                <div className="mt-2 flex gap-3">
-                                  <button
-                                    onClick={() => openSendModal(token)}
-                                    className="text-xs text-yellow-400"
-                                  >
-                                    Send
-                                  </button>
+                              <button
+                                onClick={() => {
+                                  setSelectedToken(token);
+                                  openSendModal();
+                                }}
+                                className="rounded-lg border border-white/10 p-2 text-gray-400 hover:border-lime-400 hover:text-lime-400"
+                                title="Send token"
+                              >
+                                <Send size={16} />
+                              </button>
 
-                                  <button
-                                    onClick={() => removeToken(token.address)}
-                                    className="text-xs text-red-400"
-                                  >
-                                    Remove
-                                  </button>
-                                </div>
-                              )}
+                              <button
+                                onClick={() => removeToken(token.address)}
+                                className="rounded-lg border border-white/10 p-2 text-gray-500 hover:border-red-500 hover:text-red-400"
+                                title="Remove token"
+                              >
+                                <X size={16} />
+                              </button>
                             </div>
                           </div>
                         ))}
                       </div>
                     )}
-                  </section>
-                )}
+                  </div>
+                </div>
+              )}
 
-                {activeTab === 'Activity' && (
-                  <section className="rounded-2xl border border-white/10 bg-[#111512] p-5">
-                    <h2 className="mb-2 text-xl font-bold">
-                      Transaction activity
-                    </h2>
-
-                    <p className="mb-5 text-xs text-gray-500">
-                      Transactions submitted during this app session.
+              {activeTab === 'Activity' && (
+                <div className="space-y-6">
+                  <div>
+                    <h2 className="text-2xl font-bold">Activity</h2>
+                    <p className="mt-1 text-sm text-gray-500">
+                      Your recent wallet transactions
                     </p>
+                  </div>
 
+                  <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#101611]">
                     {activities.length === 0 ? (
-                      <div className="py-12 text-center">
+                      <div className="p-12 text-center">
                         <History
+                          size={36}
                           className="mx-auto mb-3 text-gray-600"
-                          size={35}
                         />
-                        <p className="text-sm text-gray-500">
-                          No activity recorded in this session.
+                        <p className="font-medium text-gray-300">
+                          No transactions yet
+                        </p>
+                        <p className="mt-2 text-sm text-gray-500">
+                          Your submitted transactions will appear here.
                         </p>
                       </div>
                     ) : (
-                      <div className="space-y-3">
+                      <div className="divide-y divide-white/10">
                         {activities.map((activity, index) => (
                           <div
                             key={`${activity.hash}-${index}`}
-                            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/5 p-4"
+                            className="flex flex-wrap items-center justify-between gap-3 p-5"
                           >
-                            <div className="flex items-center gap-3">
-                              <div className="rounded-xl bg-white/5 p-3">
-                                <ArrowUpRight
-                                  className="text-yellow-400"
-                                  size={19}
-                                />
+                            <div className="flex min-w-0 items-center gap-3">
+                              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
+                                activity.type === 'Send'
+                                  ? 'bg-red-500/10 text-red-400'
+                                  : 'bg-green-500/10 text-green-400'
+                              }`}>
+                                {activity.type === 'Send'
+                                  ? <ArrowUpRight size={20} />
+                                  : <ArrowDownLeft size={20} />}
                               </div>
 
-                              <div>
+                              <div className="min-w-0">
                                 <p className="font-semibold">
                                   {activity.type} {activity.symbol}
                                 </p>
                                 <p className="text-xs text-gray-500">
-                                  {activity.network} ·{' '}
+                                  {activity.network}
+                                </p>
+                                <p className="mt-1 text-xs text-gray-600">
                                   {new Date(activity.date).toLocaleString()}
                                 </p>
                               </div>
                             </div>
 
                             <div className="text-right">
-                              <p className="font-bold">
+                              <p className="font-semibold">
                                 {activity.amount} {activity.symbol}
                               </p>
-
                               <a
                                 href={getExplorerUrl(
                                   activity.hash,
@@ -1438,7 +1452,7 @@ export default function App() {
                                 )}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="mt-1 inline-flex items-center gap-1 text-xs text-yellow-400"
+                                className="mt-1 inline-flex items-center gap-1 text-xs text-lime-400 hover:underline"
                               >
                                 View transaction
                                 <ExternalLink size={12} />
@@ -1448,335 +1462,319 @@ export default function App() {
                         ))}
                       </div>
                     )}
-                  </section>
-                )}
+                  </div>
+                </div>
+              )}
 
-                {activeTab === 'Settings' && (
-                  <section className="space-y-5">
-                    <div className="rounded-2xl border border-white/10 bg-[#111512] p-5">
-                      <h2 className="text-xl font-bold">Settings</h2>
-                      <p className="mt-1 text-sm text-gray-500">
-                        Manage your wallet preferences and connections.
-                      </p>
-                    </div>
+              {activeTab === 'Settings' && (
+                <div className="space-y-6">
+                  <div>
+                    <h2 className="text-2xl font-bold">Settings</h2>
+                    <p className="mt-1 text-sm text-gray-500">
+                      Wallet information and connection settings
+                    </p>
+                  </div>
 
-                    <div className="rounded-2xl border border-white/10 bg-[#111512] p-5">
-                      <h3 className="mb-4 font-bold">
-                        Wallet information
-                      </h3>
+                  <div className="rounded-2xl border border-white/10 bg-[#101611] p-5">
+                    <h3 className="mb-4 font-semibold">Wallet Information</h3>
 
-                      <div className="space-y-4">
-                        <div>
-                          <p className="mb-1 text-xs text-gray-500">
-                            Current network
-                          </p>
-                          <p className="font-semibold">{networkName}</p>
-                        </div>
-
-                        <div>
-                          <p className="mb-1 text-xs text-gray-500">
-                            Wallet address
-                          </p>
-
-                          <div className="flex items-center gap-2">
-                            <p className="min-w-0 flex-1 break-all text-sm">
-                              {currentAddress || 'No address available'}
-                            </p>
-
-                            <button
-                              onClick={() => void copyAddress()}
-                              disabled={!currentAddress}
-                              className="rounded-lg border border-white/10 p-2 text-yellow-400 disabled:opacity-40"
-                            >
-                              <Copy size={17} />
-                            </button>
-                          </div>
-                        </div>
-
-                        <div>
-                          <p className="mb-1 text-xs text-gray-500">
-                            Account email
-                          </p>
-                          <p className="break-all text-sm">
-                            {user?.email?.address || 'Not available'}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-2xl border border-white/10 bg-[#111512] p-5">
-                      <h3 className="mb-4 font-bold">
-                        Network connection
-                      </h3>
-
-                      {network === 'tron' ? (
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                          <div>
-                            <p className="font-semibold">TronLink</p>
-                            <p className="mt-1 text-xs text-gray-500">
-                              {tronConnected
-                                ? 'Wallet connected'
-                                : 'Wallet not connected'}
-                            </p>
-                          </div>
-
-                          <button
-                            onClick={() => void connectTron()}
-                            className="rounded-xl bg-yellow-400 px-4 py-2.5 text-sm font-bold text-black"
-                          >
-                            {tronConnected ? 'Reconnect' : 'Connect TRON'}
-                          </button>
-                        </div>
-                      ) : (
-                        <p className="text-sm text-gray-400">
-                          {networkName} selected.
+                    <div className="space-y-4">
+                      <div>
+                        <p className="text-xs text-gray-500">Wallet Address</p>
+                        <p className="mt-1 break-all font-mono text-sm">
+                          {currentAddress || 'Not connected'}
                         </p>
-                      )}
-                    </div>
-
-                    <div className="rounded-2xl border border-white/10 bg-[#111512] p-5">
-                      <h3 className="mb-3 font-bold">
-                        Display preferences
-                      </h3>
-
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="font-medium">
-                            Wallet balance visibility
-                          </p>
-                          <p className="mt-1 text-xs text-gray-500">
-                            Hide or show your balance.
-                          </p>
-                        </div>
-
-                        <button
-                          onClick={() => setShowBalance(!showBalance)}
-                          className={`rounded-full px-4 py-2 text-xs font-bold ${
-                            showBalance
-                              ? 'bg-yellow-400 text-black'
-                              : 'bg-white/10 text-white'
-                          }`}
-                        >
-                          {showBalance ? 'Visible' : 'Hidden'}
-                        </button>
                       </div>
-                    </div>
 
-                    <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-5">
-                      <h3 className="font-bold text-red-400">
-                        Account
-                      </h3>
+                      <div className="border-t border-white/10 pt-4">
+                        <p className="text-xs text-gray-500">Active Network</p>
+                        <p className="mt-1 font-medium">{networkName}</p>
+                      </div>
 
-                      <p className="mt-2 text-sm text-gray-400">
-                        Disconnect your current YALO Wallet session.
-                      </p>
-
-                      <button
-                        onClick={() => void logout()}
-                        className="mt-4 flex items-center gap-2 rounded-xl border border-red-500/30 px-4 py-3 text-sm font-semibold text-red-400 hover:bg-red-500/10"
-                      >
-                        <LogOut size={17} />
-                        Disconnect wallet
-                      </button>
-                    </div>
-                  </section>
-                )}
-              </>
-            )}
-          </div>
-        </main>
-      </div>
-
-      {modal && authenticated && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
-          onClick={event => {
-            if (event.target === event.currentTarget) {
-              closeModal();
-            }
-          }}
-        >
-          <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#111512] p-6 shadow-2xl">
-            <div className="mb-6 flex items-center justify-between">
-              <h2 className="text-xl font-bold">
-                {modal === 'send'
-                  ? 'Send Assets'
-                  : modal === 'receive'
-                    ? 'Receive Assets'
-                    : 'Add Token'}
-              </h2>
-
-              <button
-                onClick={closeModal}
-                disabled={loading}
-                className="rounded-lg border border-white/10 p-2 text-gray-400 hover:text-white disabled:opacity-40"
-              >
-                <X size={19} />
-              </button>
-            </div>
-
-            {modal === 'send' && (
-              <div className="space-y-4">
-                <div>
-                  <label className="mb-2 block text-sm text-gray-400">
-                    Network
-                  </label>
-                  <div className="rounded-xl border border-white/10 bg-black/20 p-3 text-sm font-semibold">
-                    {networkName}
-                  </div>
-                </div>
-
-                {selectedToken && (
-                  <div className="rounded-xl border border-yellow-400/20 bg-yellow-400/5 p-3">
-                    <p className="text-xs text-gray-500">
-                      Selected token
-                    </p>
-                    <p className="font-bold text-yellow-400">
-                      {selectedToken.symbol}
-                    </p>
-                  </div>
-                )}
-
-                <div>
-                  <label className="mb-2 block text-sm text-gray-400">
-                    Recipient address
-                  </label>
-                  <input
-                    value={recipient}
-                    onChange={event => setRecipient(event.target.value.trim())}
-                    placeholder={
-                      network === 'solana'
-                        ? 'Solana address'
-                        : network === 'tron'
-                          ? 'TRON address'
-                          : '0x...'
-                    }
-                    className="w-full rounded-xl border border-white/10 bg-black/30 p-3 text-sm outline-none focus:border-yellow-400"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm text-gray-400">
-                    Amount ({selectedToken?.symbol || nativeSymbol})
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={amount}
-                    onChange={event => setAmount(event.target.value)}
-                    placeholder="0.00"
-                    className="w-full rounded-xl border border-white/10 bg-black/30 p-3 text-sm outline-none focus:border-yellow-400"
-                  />
-                </div>
-
-                <button
-                  onClick={() => void handleSend()}
-                  disabled={loading || !recipient || !isValidAmount(amount)}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-yellow-400 py-4 font-bold text-black transition hover:bg-yellow-300 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {loading ? (
-                    <>
-                      <RefreshCw size={18} className="animate-spin" />
-                      Processing...
-                    </>
-                  ) : (
-                    <>
-                      <Send size={18} />
-                      Continue
-                    </>
-                  )}
-                </button>
-
-                <p className="text-center text-xs text-gray-600">
-                  Always verify the recipient address and network before approving.
-                </p>
-              </div>
-            )}
-
-            {modal === 'receive' && (
-              <div className="space-y-5 text-center">
-                <p className="text-sm text-gray-400">
-                  Receive {nativeSymbol} on {networkName}.
-                </p>
-
-                {currentAddress ? (
-                  <>
-                    <div className="mx-auto flex w-fit items-center justify-center rounded-2xl bg-white p-4">
-                      <QRCodeSVG
-                        value={currentAddress}
-                        size={190}
-                        level="H"
-                      />
-                    </div>
-
-                    <div className="rounded-xl border border-white/10 bg-black/20 p-3">
-                      <p className="break-all text-sm">
-                        {currentAddress}
-                      </p>
+                      <div className="border-t border-white/10 pt-4">
+                        <p className="text-xs text-gray-500">Account Email</p>
+                        <p className="mt-1 font-medium">
+                          {user?.email?.address || 'Not available'}
+                        </p>
+                      </div>
                     </div>
 
                     <button
                       onClick={() => void copyAddress()}
-                      className="flex w-full items-center justify-center gap-2 rounded-xl bg-yellow-400 py-3 font-bold text-black"
+                      className="mt-5 flex items-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-sm hover:border-lime-400/50"
                     >
-                      <Copy size={18} />
-                      Copy address
+                      <Copy size={16} />
+                      Copy Wallet Address
                     </button>
-                  </>
-                ) : (
-                  <p className="rounded-xl bg-white/5 p-5 text-sm text-gray-400">
-                    No wallet address available for this network.
-                  </p>
-                )}
+                  </div>
 
-                <p className="text-xs text-red-400">
-                  Only send assets supported by the selected network to this address.
-                </p>
-              </div>
-            )}
+                  <div className="rounded-2xl border border-white/10 bg-[#101611] p-5">
+                    <h3 className="mb-2 font-semibold">TRON Wallet</h3>
+                    <p className="mb-4 text-sm text-gray-500">
+                      Connect using the TronLink browser wallet.
+                    </p>
 
-            {modal === 'token' && (
-              <div className="space-y-4">
-                <p className="text-sm text-gray-400">
-                  Add an ERC-20 token using its contract address on {networkName}.
-                </p>
+                    <div className="mb-4 break-all font-mono text-sm text-gray-400">
+                      {tronAddress || 'No TRON wallet detected'}
+                    </div>
 
-                <div>
-                  <label className="mb-2 block text-sm text-gray-400">
-                    Token contract address
-                  </label>
+                    <button
+                      onClick={() => void connectTron()}
+                      className="rounded-xl border border-white/10 px-4 py-3 text-sm hover:border-lime-400/50"
+                    >
+                      {tronConnected ? 'Reconnect TRON' : 'Connect TronLink'}
+                    </button>
+                  </div>
 
-                  <input
-                    value={tokenAddress}
-                    onChange={event => setTokenAddress(event.target.value.trim())}
-                    placeholder="0x..."
-                    className="w-full rounded-xl border border-white/10 bg-black/30 p-3 text-sm outline-none focus:border-yellow-400"
-                  />
+                  <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-5">
+                    <h3 className="mb-2 font-semibold text-red-400">
+                      Sign Out
+                    </h3>
+                    <p className="mb-4 text-sm text-gray-500">
+                      Disconnect your current YALO wallet session.
+                    </p>
+
+                    <button
+                      onClick={() => void logout()}
+                      className="flex items-center gap-2 rounded-xl border border-red-500/30 px-4 py-3 text-sm text-red-400 hover:bg-red-500/10"
+                    >
+                      <LogOut size={16} />
+                      Log Out
+                    </button>
+                  </div>
                 </div>
+              )}
+              
+              {modal === 'send' && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+                  <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#101611] p-6 shadow-2xl">
+                    <div className="mb-6 flex items-center justify-between">
+                      <h3 className="text-xl font-bold">Send Crypto</h3>
+                      <button
+                        onClick={closeModal}
+                        className="rounded-lg p-2 text-gray-400 hover:bg-white/10"
+                      >
+                        <X size={20} />
+                      </button>
+                    </div>
 
-                <button
-                  onClick={() => void addEvmToken()}
-                  disabled={loading || !isAddress(tokenAddress)}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-yellow-400 py-4 font-bold text-black disabled:opacity-50"
-                >
-                  {loading ? (
-                    <>
-                      <RefreshCw size={18} className="animate-spin" />
-                      Loading token...
-                    </>
-                  ) : (
-                    <>
-                      <Plus size={18} />
-                      Add token
-                    </>
-                  )}
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+                    <div className="mb-5 rounded-xl border border-white/10 bg-black/20 p-3">
+                      <p className="text-xs text-gray-500">Network</p>
+                      <p className="mt-1 font-semibold">{networkName}</p>
+                    </div>
+
+                    {network === 'tron' && !tronConnected && (
+                      <div className="mb-4 rounded-xl border border-yellow-500/20 bg-yellow-500/10 p-3 text-sm text-yellow-400">
+                        Connect TronLink before sending TRX.
+                        <button
+                          onClick={() => void connectTron()}
+                          className="ml-2 underline"
+                        >
+                          Connect
+                        </button>
+                      </div>
+                    )}
+
+                    {network === 'solana' && (
+                      <p className="mb-4 text-xs text-gray-500">
+                        Sending native SOL on Solana.
+                      </p>
+                    )}
+
+                    {isEvm && tokens.length > 0 && (
+                      <div className="mb-4">
+                        <label className="mb-2 block text-sm text-gray-400">
+                          Asset
+                        </label>
+
+                        <select
+                          value={selectedToken?.address || 'native'}
+                          onChange={value => {
+                            const token = tokens.find(
+                              item => item.address === value
+                            );
+
+                            setSelectedToken(token || null);
+                          }}
+                          className="w-full rounded-xl border border-white/10 bg-[#080b09] px-4 py-3 text-white outline-none"
+                        >
+                          <option value="native">
+                            Native {nativeSymbol}
+                          </option>
+
+                          {tokens.map(token => (
+                            <option
+                              key={token.address}
+                              value={token.address}
+                            >
+                              {token.symbol}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    <div className="mb-4">
+                      <label className="mb-2 block text-sm text-gray-400">
+                        Recipient Address
+                      </label>
+                      <input
+                        type="text"
+                        value={recipient}
+                        onChange={event => setRecipient(event.target.value)}
+                        placeholder="Enter recipient wallet address"
+                        className="w-full rounded-xl border border-white/10 bg-[#080b09] px-4 py-3 text-sm text-white outline-none focus:border-lime-400"
+                      />
+                    </div>
+
+                    <div className="mb-6">
+                      <label className="mb-2 block text-sm text-gray-400">
+                        Amount ({selectedToken?.symbol || nativeSymbol})
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={amount}
+                        onChange={event => setAmount(event.target.value)}
+                        placeholder="0.00"
+                        className="w-full rounded-xl border border-white/10 bg-[#080b09] px-4 py-3 text-white outline-none focus:border-lime-400"
+                      />
+                    </div>
+
+                    <button
+                      onClick={() => void handleSend()}
+                      disabled={loading || !recipient || !amount}
+                      className="flex w-full items-center justify-center gap-2 rounded-xl bg-lime-400 py-3 font-bold text-black hover:bg-lime-300 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {loading ? (
+                        <>
+                          <RefreshCw size={17} className="animate-spin" />
+                          Processing...
+                        </>
+                      ) : (
+                        <>
+                          <Send size={17} />
+                          Send {selectedToken?.symbol || nativeSymbol}
+                        </>
+                      )}
+                    </button>
+
+                    <p className="mt-4 text-center text-xs text-gray-600">
+                      Check the network and recipient address before confirming.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {modal === 'receive' && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+                  <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#101611] p-6 text-center shadow-2xl">
+                    <div className="mb-5 flex items-center justify-between">
+                      <h3 className="text-xl font-bold">Receive Crypto</h3>
+                      <button
+                        onClick={closeModal}
+                        className="rounded-lg p-2 text-gray-400 hover:bg-white/10"
+                      >
+                        <X size={20} />
+                      </button>
+                    </div>
+
+                    <div className="mx-auto mb-5 flex h-52 w-52 items-center justify-center rounded-2xl bg-white p-3">
+                      {currentAddress ? (
+                        <QRCodeSVG
+                          value={currentAddress}
+                          size={184}
+                          level="H"
+                        />
+                      ) : (
+                        <p className="text-sm text-black">
+                          Wallet address unavailable
+                        </p>
+                      )}
+                    </div>
+
+                    <p className="mb-2 text-sm text-gray-400">
+                      Your {networkName} wallet address
+                    </p>
+
+                    <div className="mb-5 break-all rounded-xl border border-white/10 bg-black/20 p-4 font-mono text-sm text-gray-300">
+                      {currentAddress || 'No address available'}
+                    </div>
+
+                    <button
+                      onClick={() => void copyAddress()}
+                      disabled={!currentAddress}
+                      className="flex w-full items-center justify-center gap-2 rounded-xl bg-lime-400 py-3 font-bold text-black hover:bg-lime-300 disabled:opacity-50"
+                    >
+                      <Copy size={17} />
+                      Copy Address
+                    </button>
+
+                    <p className="mt-4 text-xs leading-5 text-yellow-500">
+                      Only send assets supported by the selected network.
+                      Sending assets on the wrong network may result in loss.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {modal === 'token' && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+                  <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#101611] p-6 shadow-2xl">
+                    <div className="mb-6 flex items-center justify-between">
+                      <h3 className="text-xl font-bold">Add Custom Token</h3>
+                      <button
+                        onClick={closeModal}
+                        className="rounded-lg p-2 text-gray-400 hover:bg-white/10"
+                      >
+                        <X size={20} />
+                      </button>
+                    </div>
+
+                    <p className="mb-5 text-sm leading-6 text-gray-500">
+                      Enter the official ERC-20 token contract address
+                      on the currently selected EVM network.
+                    </p>
+
+                    <label className="mb-2 block text-sm text-gray-400">
+                      Token Contract Address
+                    </label>
+
+                    <input
+                      type="text"
+                      value={tokenAddress}
+                      onChange={event => setTokenAddress(event.target.value)}
+                      placeholder="0x..."
+                      className="mb-6 w-full rounded-xl border border-white/10 bg-[#080b09] px-4 py-3 text-sm text-white outline-none focus:border-lime-400"
+                    />
+
+                    <button
+                      onClick={() => void addEvmToken()}
+                      disabled={loading || !tokenAddress}
+                      className="flex w-full items-center justify-center gap-2 rounded-xl bg-lime-400 py-3 font-bold text-black hover:bg-lime-300 disabled:opacity-50"
+                    >
+                      {loading ? (
+                        <>
+                          <RefreshCw size={17} className="animate-spin" />
+                          Adding...
+                        </>
+                      ) : (
+                        <>
+                          <Plus size={17} />
+                          Add Token
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </main>
+      </div>
     </div>
   );
-}
+                          }
+
+                                 
