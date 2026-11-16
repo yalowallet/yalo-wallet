@@ -9,27 +9,13 @@ import {
   UnconfiguredEscrowProvider,
   UnconfiguredXofPaymentProvider,
   type AdvertisementStatus,
-  type OrderStatus,
-  type P2PSide
+  type OrderStatus
 } from './domain';
 
 interface D1Result { success: boolean; results?: Array<Record<string, unknown>>; meta?: { changes?: number }; }
-interface D1PreparedStatement {
-  bind(...values: unknown[]): D1PreparedStatement;
-  first<T = Record<string, unknown>>(): Promise<T | null>;
-  all<T = Record<string, unknown>>(): Promise<D1Result & { results: T[] }>;
-  run(): Promise<D1Result>;
-}
+interface D1PreparedStatement { bind(...values: unknown[]): D1PreparedStatement; first<T = Record<string, unknown>>(): Promise<T | null>; all<T = Record<string, unknown>>(): Promise<D1Result & { results: T[] }>; run(): Promise<D1Result>; }
 interface D1Database { prepare(sql: string): D1PreparedStatement; batch<T = D1Result>(statements: D1PreparedStatement[]): Promise<T[]>; }
-interface Env {
-  DB: D1Database;
-  PRIVY_APP_ID: string;
-  PRIVY_ISSUER?: string;
-  ALLOWED_ORIGIN?: string;
-  ENABLED_XOF_PAYMENT_METHODS?: string;
-  P2P_ADMIN_SUBJECTS?: string;
-  FEE_BPS?: string;
-}
+interface Env { DB: D1Database; PRIVY_APP_ID: string; PRIVY_ISSUER?: string; ALLOWED_ORIGIN?: string; ENABLED_XOF_PAYMENT_METHODS?: string; P2P_ADMIN_SUBJECTS?: string; FEE_BPS?: string; }
 interface Principal { privyId: string; }
 
 const escrow = new UnconfiguredEscrowProvider();
@@ -41,9 +27,8 @@ const now = () => new Date().toISOString();
 
 function cors(request: Request, env: Env, response: Response): Response {
   const origin = request.headers.get('Origin');
-  const allowed = env.ALLOWED_ORIGIN;
   const headers = new Headers(response.headers);
-  if (origin && allowed && origin === allowed) {
+  if (origin && env.ALLOWED_ORIGIN && origin === env.ALLOWED_ORIGIN) {
     headers.set('Access-Control-Allow-Origin', origin);
     headers.set('Vary', 'Origin');
     headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Request-Id');
@@ -51,30 +36,20 @@ function cors(request: Request, env: Env, response: Response): Response {
   }
   return new Response(response.body, { status: response.status, headers });
 }
-
 async function bodyJson(request: Request): Promise<Record<string, unknown>> {
-  const length = Number(request.headers.get('Content-Length') || 0);
-  if (length > 32_000) throw new Error('Request body too large.');
+  if (Number(request.headers.get('Content-Length') || 0) > 32_000) throw new Error('Request body too large.');
   const value: unknown = await request.json();
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('JSON object required.');
   return value as Record<string, unknown>;
 }
-
 async function audit(db: D1Database, actor: string, action: string, entityType: string, entityId: string, details: unknown, request: Request) {
-  await db.prepare('INSERT INTO audit_logs (id, actor_privy_id, action, entity_type, entity_id, details_json, request_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-    .bind(id(), actor, action, entityType, entityId, JSON.stringify(details), request.headers.get('X-Request-Id'), now()).run();
+  await db.prepare('INSERT INTO audit_logs (id, actor_privy_id, action, entity_type, entity_id, details_json, request_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id(), actor, action, entityType, entityId, JSON.stringify(details), request.headers.get('X-Request-Id'), now()).run();
 }
-
 async function ensureUser(db: D1Database, principal: Principal) {
-  await db.prepare('INSERT INTO users (privy_id, created_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(privy_id) DO UPDATE SET updated_at = excluded.updated_at')
-    .bind(principal.privyId, now(), now()).run();
-  await db.prepare('INSERT INTO trader_profiles (privy_id, display_name, reputation_score, completed_orders, created_at, updated_at) VALUES (?, ?, 0, 0, ?, ?) ON CONFLICT(privy_id) DO NOTHING')
-    .bind(principal.privyId, `Trader ${principal.privyId.slice(-6)}`, now(), now()).run();
+  await db.prepare('INSERT INTO users (privy_id, created_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(privy_id) DO UPDATE SET updated_at = excluded.updated_at').bind(principal.privyId, now(), now()).run();
+  await db.prepare('INSERT INTO trader_profiles (privy_id, display_name, reputation_score, completed_orders, created_at, updated_at) VALUES (?, ?, 0, 0, ?, ?) ON CONFLICT(privy_id) DO NOTHING').bind(principal.privyId, `Trader ${principal.privyId.slice(-6)}`, now(), now()).run();
 }
-
-function allowedPaymentMethods(env: Env): string[] {
-  return (env.ENABLED_XOF_PAYMENT_METHODS || '').split(',').map((x) => x.trim()).filter(Boolean);
-}
+function allowedPaymentMethods(env: Env): string[] { return (env.ENABLED_XOF_PAYMENT_METHODS || '').split(',').map((x) => x.trim()).filter(Boolean); }
 
 async function handle(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -82,10 +57,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204 });
   if (route === '/health' && request.method === 'GET') return json({ status: 'ok', market: 'USDT/XOF', escrowConfigured: escrow.configured, xofPaymentProviderConfigured: xofPayment.configured });
   if (route === '/webhooks/xof' && request.method === 'POST') {
-    // Never trust browser assertions. This route remains closed until a provider-specific signature verifier is configured.
     if (!xofPayment.configured) return fail('XOF payment webhook integration is not configured.', 503);
-    const raw = await request.text();
-    const event = await xofPayment.verifyWebhook(request, raw);
+    const event = await xofPayment.verifyWebhook(request, await request.text());
     return json({ received: true, eventId: event.eventId });
   }
 
@@ -95,8 +68,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
   await ensureUser(env.DB, principal);
 
   if (route === '/profile' && request.method === 'GET') {
-    const profile = await env.DB.prepare('SELECT privy_id, display_name, bio, reputation_score, completed_orders, created_at FROM trader_profiles WHERE privy_id = ?').bind(principal.privyId).first();
-    return json({ profile });
+    return json({ profile: await env.DB.prepare('SELECT privy_id, display_name, bio, reputation_score, completed_orders, created_at FROM trader_profiles WHERE privy_id = ?').bind(principal.privyId).first() });
   }
   if (route === '/profile' && request.method === 'PATCH') {
     const data = await bodyJson(request);
@@ -114,9 +86,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const params: unknown[] = mine ? [principal.privyId] : [];
     if (side) { predicates.push('a.side = ?'); params.push(side); }
     const rows = await env.DB.prepare(`SELECT a.id, a.side, a.price_xof_per_usdt, a.min_usdt_micros, a.max_usdt_micros, a.available_usdt_micros, a.payment_methods_json, a.status, p.display_name, p.reputation_score, p.completed_orders FROM advertisements a JOIN trader_profiles p ON p.privy_id = a.owner_privy_id WHERE ${predicates.join(' AND ')} ORDER BY a.created_at DESC LIMIT 100`).bind(...params).all();
-    return json({ advertisements: rows.results.map((row) => ({
-      id: row.id, side: row.side, priceXofPerUsdt: String(row.price_xof_per_usdt), minUsdt: formatUsdtMicros(BigInt(String(row.min_usdt_micros))), maxUsdt: formatUsdtMicros(BigInt(String(row.max_usdt_micros))), availableUsdt: formatUsdtMicros(BigInt(String(row.available_usdt_micros))), paymentMethods: JSON.parse(String(row.payment_methods_json)), status: row.status, merchant: { displayName: row.display_name, rating: Number(row.reputation_score), completedOrders: Number(row.completed_orders) }
-    })) });
+    return json({ advertisements: rows.results.map((row) => ({ id: row.id, side: row.side, priceXofPerUsdt: String(row.price_xof_per_usdt), minUsdt: formatUsdtMicros(BigInt(String(row.min_usdt_micros))), maxUsdt: formatUsdtMicros(BigInt(String(row.max_usdt_micros))), availableUsdt: formatUsdtMicros(BigInt(String(row.available_usdt_micros))), paymentMethods: JSON.parse(String(row.payment_methods_json)), status: row.status, merchant: { displayName: row.display_name, completedOrders: Number(row.completed_orders), rating: Number(row.reputation_score) } })) });
   }
 
   if (route === '/advertisements' && request.method === 'POST') {
@@ -131,10 +101,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const allowed = allowedPaymentMethods(env);
     const methods = [...new Set(data.paymentMethods as string[])];
     if (!allowed.length || methods.some((method) => !allowed.includes(method))) return fail('No requested XOF payment method is configured and enabled.', 503);
-    const adId = id();
-    const timestamp = now();
-    await env.DB.prepare('INSERT INTO advertisements (id, owner_privy_id, side, price_xof_per_usdt, min_usdt_micros, max_usdt_micros, available_usdt_micros, payment_methods_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, \'active\', ?, ?)')
-      .bind(adId, principal.privyId, data.side, price.toString(), min.toString(), max.toString(), max.toString(), JSON.stringify(methods), timestamp, timestamp).run();
+    const adId = id(), timestamp = now();
+    await env.DB.prepare("INSERT INTO advertisements (id, owner_privy_id, side, price_xof_per_usdt, min_usdt_micros, max_usdt_micros, available_usdt_micros, payment_methods_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)").bind(adId, principal.privyId, data.side, price.toString(), min.toString(), max.toString(), max.toString(), JSON.stringify(methods), timestamp, timestamp).run();
     await audit(env.DB, principal.privyId, 'advertisement.create', 'advertisement', adId, { side: data.side, currency: 'XOF' }, request);
     return json({ id: adId, status: 'active' }, 201);
   }
@@ -145,15 +113,14 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const ad = await env.DB.prepare('SELECT owner_privy_id, status FROM advertisements WHERE id = ?').bind(adId).first<{ owner_privy_id: string; status: AdvertisementStatus }>();
     if (!ad) return fail('Advertisement not found.', 404);
     if (ad.owner_privy_id !== principal.privyId) return fail('Not authorized to manage this advertisement.', 403);
+    if (ad.status === 'cancelled') return fail('Cancelled advertisements cannot be changed.', 409);
     if (request.method === 'DELETE') {
-      if (ad.status === 'cancelled') return fail('Advertisement is already cancelled.', 409);
       await env.DB.prepare("UPDATE advertisements SET status = 'cancelled', updated_at = ? WHERE id = ? AND owner_privy_id = ? AND status != 'cancelled'").bind(now(), adId, principal.privyId).run();
       await audit(env.DB, principal.privyId, 'advertisement.cancel', 'advertisement', adId, {}, request);
       return json({ id: adId, status: 'cancelled' });
     }
     const data = await bodyJson(request);
     if (data.status !== 'active' && data.status !== 'paused') return fail('Status must be active or paused.');
-    if (ad.status === 'cancelled') return fail('Cancelled advertisements cannot be reactivated.', 409);
     await env.DB.prepare('UPDATE advertisements SET status = ?, updated_at = ? WHERE id = ? AND owner_privy_id = ?').bind(data.status, now(), adId, principal.privyId).run();
     await audit(env.DB, principal.privyId, 'advertisement.status', 'advertisement', adId, { status: data.status }, request);
     return json({ id: adId, status: data.status });
@@ -161,43 +128,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   if (route === '/orders' && request.method === 'GET') {
     const rows = await env.DB.prepare('SELECT id, side, status, escrow_status, amount_usdt_micros, rate_xof_per_usdt, total_xof, fee_xof, payout_xof, buyer_privy_id, seller_privy_id FROM p2p_orders WHERE buyer_privy_id = ? OR seller_privy_id = ? ORDER BY created_at DESC LIMIT 100').bind(principal.privyId, principal.privyId).all();
-    return json({ orders: rows.results.map((row) => ({ id: row.id, side: row.buyer_privy_id === principal.privyId ? 'buy' : 'sell', status: row.status, escrowStatus: row.escrow_status, amountUsdt: formatUsdtMicros(BigInt(String(row.amount_usdt_micros))), rateXofPerUsdt: String(row.rate_xof_per_usdt), totalXof: String(row.total_xof), feeXof: String(row.fee_xof), payoutXof: String(row.payout_xof), availableActions: row.status === 'awaiting_payment' && row.buyer_privy_id === principal.privyId ? ['payment_sent', 'cancel'] : row.status === 'payment_reported' ? ['dispute'] : row.status === 'awaiting_escrow' ? ['cancel'] : [] })) });
+    return json({ orders: rows.results.map((row) => ({ id: row.id, side: row.buyer_privy_id === principal.privyId ? 'buy' : 'sell', status: row.status, escrowStatus: row.escrow_status, amountUsdt: formatUsdtMicros(BigInt(String(row.amount_usdt_micros))), rateXofPerUsdt: String(row.rate_xof_per_usdt), totalXof: String(row.total_xof), feeXof: String(row.fee_xof), payoutXof: String(row.payout_xof), availableActions: row.status === 'awaiting_payment' && row.buyer_privy_id === principal.privyId ? ['payment_sent', 'cancel', 'dispute'] : row.status === 'payment_reported' ? ['dispute'] : row.status === 'awaiting_escrow' ? ['cancel', 'dispute'] : [] })) });
   }
   if (route === '/orders' && request.method === 'POST') {
-    // No internal balance counter is treated as real collateral. Fail closed until an escrow adapter is configured.
     if (!escrow.configured) throw new IntegrationUnavailableError('USDT escrow is not configured. Orders cannot be opened and no funds were reserved.');
-    const data = await bodyJson(request);
-    if (typeof data.advertisementId !== 'string') return fail('Advertisement is required.');
-    let amount: bigint;
-    try { amount = parseUsdtMicros(data.amountUsdt); } catch (e) { return fail(e instanceof Error ? e.message : 'Invalid USDT amount.'); }
-    const ad = await env.DB.prepare("SELECT id, owner_privy_id, side, price_xof_per_usdt, min_usdt_micros, max_usdt_micros, available_usdt_micros FROM advertisements WHERE id = ? AND status = 'active'").bind(data.advertisementId).first<Record<string, unknown>>();
-    if (!ad) return fail('Active advertisement not found.', 404);
-    if (ad.owner_privy_id === principal.privyId) return fail('You cannot open an order against your own advertisement.');
-    if (amount < BigInt(String(ad.min_usdt_micros)) || amount > BigInt(String(ad.max_usdt_micros)) || amount > BigInt(String(ad.available_usdt_micros))) return fail('USDT amount is outside this advertisement’s limits or availability.');
-    const orderId = id();
-    const sellerId = String(ad.side) === 'sell' ? String(ad.owner_privy_id) : principal.privyId;
-    const buyerId = String(ad.side) === 'buy' ? String(ad.owner_privy_id) : principal.privyId;
-    const rate = BigInt(String(ad.price_xof_per_usdt));
-    const total = calculateXof(amount, rate);
-    const fee = calculateFeeXof(total, Number(env.FEE_BPS || 0));
-    const reservation = await escrow.reserve({ orderId, sellerPrivyId: sellerId, amountUsdtMicros: amount });
-    const status: OrderStatus = 'awaiting_escrow';
-    const result = await env.DB.prepare("UPDATE advertisements SET available_usdt_micros = CAST(available_usdt_micros AS INTEGER) - ?, updated_at = ? WHERE id = ? AND status = 'active' AND CAST(available_usdt_micros AS INTEGER) >= ?")
-      .bind(amount.toString(), now(), String(ad.id), amount.toString()).run();
-    if (!result.meta?.changes) {
-      await escrow.refund({ orderId, reservationReference: reservation.reference, sellerPrivyId: sellerId });
-      return fail('Advertisement inventory changed; retry with a current offer.', 409);
-    }
-    try {
-      await env.DB.prepare('INSERT INTO p2p_orders (id, advertisement_id, buyer_privy_id, seller_privy_id, side, status, escrow_status, escrow_reference, amount_usdt_micros, rate_xof_per_usdt, total_xof, fee_xof, payout_xof, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .bind(orderId, ad.id, buyerId, sellerId, ad.side, status, 'reserved', reservation.reference, amount.toString(), rate.toString(), total.toString(), fee.toString(), (total - fee).toString(), now(), now()).run();
-    } catch (error) {
-      await env.DB.prepare('UPDATE advertisements SET available_usdt_micros = CAST(available_usdt_micros AS INTEGER) + ?, updated_at = ? WHERE id = ?').bind(amount.toString(), now(), String(ad.id)).run();
-      await escrow.refund({ orderId, reservationReference: reservation.reference, sellerPrivyId: sellerId });
-      throw error;
-    }
-    await audit(env.DB, principal.privyId, 'order.create', 'p2p_order', orderId, { amountUsdt: formatUsdtMicros(amount), totalXof: total.toString() }, request);
-    return json({ id: orderId, status }, 201);
+    return fail('Order creation is disabled until atomic escrow and listing inventory reservation are implemented.', 503);
   }
 
   const actionMatch = route.match(/^\/orders\/([0-9a-f-]+)\/actions\/([a-z_]+)$/i);
@@ -208,31 +143,31 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const status = String(order.status) as OrderStatus;
     if (action === 'payment_sent') {
       if (order.buyer_privy_id !== principal.privyId || status !== 'awaiting_payment') return fail('Only the buyer can report payment for an order awaiting payment.', 409);
-      // This is a buyer assertion only. It never verifies fiat settlement or releases crypto.
       assertOrderTransition(status, 'payment_reported');
-      await env.DB.prepare("UPDATE p2p_orders SET status = 'payment_reported', payment_reported_at = ?, updated_at = ? WHERE id = ? AND status = 'awaiting_payment'").bind(now(), now(), orderId).run();
+      const result = await env.DB.prepare("UPDATE p2p_orders SET status = 'payment_reported', payment_reported_at = ?, updated_at = ? WHERE id = ? AND status = 'awaiting_payment'").bind(now(), now(), orderId).run();
+      if (!result.meta?.changes) return fail('Order state changed; refresh and retry.', 409);
     } else if (action === 'cancel') {
       if (status !== 'awaiting_escrow' && status !== 'awaiting_payment') return fail('Order cannot be cancelled at this stage; open a dispute instead.', 409);
-      assertOrderTransition(status, 'cancelled');
-      await env.DB.prepare("UPDATE p2p_orders SET status = 'cancelled', escrow_status = 'refund_pending', updated_at = ? WHERE id = ? AND status = ?").bind(now(), orderId, status).run();
-      return fail('Cancellation is recorded only after the configured escrow provider confirms its refund; no escrow provider is configured.', 503);
+      // Do not change order state unless the escrow provider can perform and confirm the refund.
+      if (!escrow.configured || typeof order.escrow_reference !== 'string') return fail('Cancellation is unavailable until a configured escrow provider can confirm the refund; order state was not changed.', 503);
+      return fail('Escrow refund integration is not implemented.', 503);
     } else if (action === 'dispute') {
       if (!['awaiting_escrow', 'awaiting_payment', 'payment_reported'].includes(status)) return fail('This order cannot be disputed at its current status.', 409);
       assertOrderTransition(status, 'disputed');
-      await env.DB.prepare("UPDATE p2p_orders SET status = 'disputed', updated_at = ? WHERE id = ? AND status = ?").bind(now(), orderId, status).run();
-      await env.DB.prepare('INSERT INTO disputes (id, order_id, opened_by_privy_id, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, \'open\', ?, ?)').bind(id(), orderId, principal.privyId, 'User opened dispute', now(), now()).run();
+      const result = await env.DB.prepare("UPDATE p2p_orders SET status = 'disputed', updated_at = ? WHERE id = ? AND status = ?").bind(now(), orderId, status).run();
+      if (!result.meta?.changes) return fail('Order state changed; refresh and retry.', 409);
+      await env.DB.prepare("INSERT INTO disputes (id, order_id, opened_by_privy_id, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'open', ?, ?)").bind(id(), orderId, principal.privyId, 'User opened dispute', now(), now()).run();
     } else {
-      return fail('Unsupported order action. Order completion and escrow release require a verified payment-provider event and configured escrow adapter.', 403);
+      return fail('Unsupported order action. Order completion and escrow release require verified payment and a configured escrow adapter.', 403);
     }
     await audit(env.DB, principal.privyId, `order.${action}`, 'p2p_order', orderId, { from: status }, request);
-    return json({ id: orderId, status: action === 'payment_sent' ? 'payment_reported' : action === 'dispute' ? 'disputed' : 'cancelled', note: action === 'payment_sent' ? 'Payment reported by buyer; this is not payment verification and does not release USDT.' : undefined });
+    return json({ id: orderId, status: action === 'payment_sent' ? 'payment_reported' : 'disputed', note: action === 'payment_sent' ? 'Payment reported by buyer; this is not payment verification and does not release USDT.' : undefined });
   }
 
   if (route === '/disputes' && request.method === 'GET') {
     const rows = await env.DB.prepare('SELECT d.id, d.order_id, d.opened_by_privy_id, d.reason, d.status, d.created_at FROM disputes d JOIN p2p_orders o ON o.id = d.order_id WHERE o.buyer_privy_id = ? OR o.seller_privy_id = ? ORDER BY d.created_at DESC LIMIT 100').bind(principal.privyId, principal.privyId).all();
     return json({ disputes: rows.results });
   }
-
   return fail('Not found.', 404);
 }
 
