@@ -1,7 +1,15 @@
+
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { PrivyProvider } from '@privy-io/react-auth';
-import { base, mainnet } from 'viem/chains';
+import {
+  base,
+  mainnet,
+  arbitrum,
+  optimism,
+  polygon
+} from 'viem/chains';
+
 import App from './App';
 import './style.css';
 
@@ -19,9 +27,17 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           showWalletLoginFirst: false
         },
         defaultChain: base,
-        supportedChains: [base, mainnet],
+        supportedChains: [
+          base,
+          mainnet,
+          arbitrum,
+          optimism,
+          polygon
+        ],
         embeddedWallets: {
-          ethereum: { createOnLogin: 'users-without-wallets' }
+          ethereum: {
+            createOnLogin: 'users-without-wallets'
+          }
         }
       }}
     >
