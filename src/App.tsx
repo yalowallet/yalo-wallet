@@ -25,6 +25,7 @@ import {
   TrendingUp,
   X
 } from 'lucide-react';
+import P2PMarketplace from './P2PMarketplace';
 
 type NetworkName = 'base' | 'ethereum';
 
@@ -339,6 +340,8 @@ export default function App() {
           </div>
         )}
 
+        <P2PMarketplace />
+
         <section className="features-section">
           <h3>Wallet Services</h3>
 
@@ -463,5 +466,4 @@ export default function App() {
       </main>
     </div>
   );
-        }
-            
+}
